@@ -6,7 +6,7 @@
   "author": "loneycoffee",
   "license": "MIT",
   "homepage": "https://github.com/loneycoffee/omarchy-proton-calendar",
-  "description": "Omarchy's clock and month calendar with your Proton Calendar events: a dot under each day that has some, the day's agenda and the week ahead, the next event on the bar as it gets close, and a reminder before it starts. Reads calendars through their 'Share with anyone' links. A drop-in replacement for omarchy.clock. Toggle the panel with: omarchy-shell shell toggle proton-calendar",
+  "description": "Omarchy's clock and month calendar with your Proton Calendar events: a dot under each day that has some, the day's agenda (for today, what is still to come), the next event on the bar as it gets close, and a reminder before it starts. Reads calendars through their 'Share with anyone' links. A drop-in replacement for omarchy.clock. Toggle the panel with: omarchy-shell shell toggle proton-calendar",
   "kinds": [
     "service",
     "bar-widget"

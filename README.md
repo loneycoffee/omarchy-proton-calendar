@@ -5,8 +5,8 @@ for `omarchy.clock`: same label, same formats, same keys, plus your events.
 
 - **The month grid** has a dot under each day with events, one per calendar
   color. Click a day to see what is on it.
-- **The agenda** lists the chosen day's events, then what is **coming up** in
-  the week ahead. Clicking an event opens Proton Calendar.
+- **The agenda** lists the chosen day's events; for today, only the ones still
+  to come (or running). Clicking an event opens Proton Calendar.
 - **On the bar**, an event about to start is named next to the time
   (`Sunday 15:40  󰃰 in 20m · Standup`) and stays there while it runs.
 - **A reminder** pops up a few minutes before each timed event.

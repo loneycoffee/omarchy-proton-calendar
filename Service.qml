@@ -63,16 +63,6 @@ Item {
     return root.events.filter(function(e) { return e.start < dayEnd && e.end > dayStart })
   }
 
-  function upcoming(fromMs, days, limit) {
-    var until = fromMs + days * 86400000
-    var out = []
-    for (var i = 0; i < root.events.length && out.length < limit; i++) {
-      var e = root.events[i]
-      if (e.end > fromMs && e.start < until) out.push(e)
-    }
-    return out
-  }
-
   function remind() {
     if (root.reminderMinutes <= 0) return
     var now = Date.now()

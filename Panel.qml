@@ -12,7 +12,7 @@ import "Model.js" as Model
 //   Year rail   how much of the year is gone
 //   Month grid  a dot under each day with events, in its calendars' colors;
 //               click a day to see it below
-//   Agenda      the chosen day's events, then what is coming up this week
+//   Agenda      the chosen day's events; for today, only those still to come
 //   Calendars   which ones are synced, when, and a form to add one
 //
 // Chevrons, the scroll wheel and h/l step months, j/k years, t comes back to
@@ -110,18 +110,17 @@ Panel {
     var parts = root.selectedKey.split("-")
     return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 12)
   }
+  // Today lists only what is still to come (or running); another day lists
+  // everything on it.
+  readonly property bool selectedIsToday: root.selectedKey === root.todayKey
   readonly property var selectedEvents: {
     if (!root.svc) return []
     var start = new Date(root.selectedDate)
     start.setHours(0, 0, 0, 0)
-    return root.svc.eventsOn(start.getTime())
-  }
-  // After today's list: the rest of the week, without repeating today.
-  readonly property var upcomingEvents: {
-    if (!root.svc || !root.viewingToday) return []
-    var tomorrow = new Date(root.today)
-    tomorrow.setHours(24, 0, 0, 0)
-    return root.svc.upcoming(tomorrow.getTime(), 7, 8)
+    var list = root.svc.eventsOn(start.getTime())
+    if (!root.selectedIsToday) return list
+    var now = clock.date.getTime()
+    return list.filter(function(e) { return e.end > now })
   }
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
@@ -728,7 +727,7 @@ Panel {
             }
           }
 
-          // ---- Agenda: the chosen day, then the week ahead.
+          // ---- Agenda: the chosen day.
           Item {
             width: parent.width
             height: agenda.implicitHeight
@@ -752,7 +751,7 @@ Panel {
               Text {
                 visible: root.selectedEvents.length === 0
                 textFormat: Text.PlainText
-                text: "Nothing planned"
+                text: root.selectedIsToday ? "Nothing else today" : "Nothing planned"
                 color: Qt.darker(root.contentForeground, 1.9)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -772,24 +771,6 @@ Panel {
                 }
               }
 
-              PanelSectionHeader {
-                visible: root.upcomingEvents.length > 0
-                topPadding: Style.space(8)
-                text: "COMING UP"
-                foreground: root.contentForeground
-                fontFamily: root.contentFontFamily
-              }
-
-              Repeater {
-                model: root.upcomingEvents
-
-                EventRow {
-                  required property var modelData
-                  event: modelData
-                  timeText: Qt.formatDate(new Date(modelData.start), "ddd d") + "  "
-                    + (modelData.allDay ? "All day" : Qt.formatTime(new Date(modelData.start), "HH:mm"))
-                }
-              }
             }
           }
 
