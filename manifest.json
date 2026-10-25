@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "id": "proton-calendar",
+  "name": "Proton Calendar",
+  "version": "1.0.0",
+  "author": "loneycoffee",
+  "license": "MIT",
+  "homepage": "https://github.com/loneycoffee/omarchy-proton-calendar",
+  "description": "Omarchy's clock and month calendar with your Proton Calendar events: a dot under each day that has some, the day's agenda and the week ahead, the next event on the bar as it gets close, and a reminder before it starts. Reads calendars through their 'Share with anyone' links. A drop-in replacement for omarchy.clock. Toggle the panel with: omarchy-shell shell toggle proton-calendar",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Calendar",
+    "description": "Clock with a calendar of your Proton Calendar events",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "format": "dddd HH:mm",
+      "formatAlt": "d MMMM 'W'ww yyyy",
+      "nextEventMinutes": 30,
+      "reminderMinutes": 10,
+      "syncMinutes": 15,
+      "openUrl": "https://calendar.proton.me"
+    },
+    "schema": [
+      {
+        "key": "nextEventMinutes",
+        "type": "integer",
+        "label": "Show the next event on the bar this many minutes ahead (0 = never)",
+        "min": 0,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "reminderMinutes",
+        "type": "integer",
+        "label": "Notify this many minutes before an event (0 = never)",
+        "min": 0,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 10
+      },
+      {
+        "key": "syncMinutes",
+        "type": "integer",
+        "label": "Sync every (minutes)",
+        "min": 5,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 15
+      },
+      {
+        "key": "openUrl",
+        "type": "string",
+        "label": "Clicking an event opens",
+        "defaultValue": "https://calendar.proton.me"
+      }
+    ]
+  }
+}

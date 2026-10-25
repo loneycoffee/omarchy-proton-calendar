@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""pcal - Proton Calendar events for the bar calendar.
+
+  pcal calendars             JSON: the calendars set up (names and colors, no links)
+  pcal add NAME URL [COLOR]  add a calendar by its "Share with anyone" link
+  pcal remove NAME           forget a calendar and its cached events
+  pcal sync                  fetch every calendar, expand its events, cache them
+  pcal events                JSON: the cached events, sorted by start
+  pcal agenda [DAYS]         plain text: what is coming up (default 7 days)
+
+Proton Calendar has no API for other apps. What it does have is a link per
+calendar (Settings -> Calendars -> a calendar -> Share with anyone) that serves
+the calendar as an .ics file. That link is the key to the calendar, so it is
+kept in ~/.config/proton-calendar/calendars.json, readable by you only, and the
+events are cached in ~/.cache/omarchy/plugins/proton-calendar/ the same way.
+
+Recurring events are expanded with python-dateutil from two months back to
+four months ahead.
+"""
+
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from dateutil.rrule import rrulestr
+
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "proton-calendar")
+CONFIG = os.path.join(CONFIG_DIR, "calendars.json")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "omarchy/plugins/proton-calendar")
+EVENTS = os.path.join(CACHE_DIR, "events.json")
+PALETTE = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#ec4899", "#14b8a6", "#a3a3a3"]
+WINDOW_BACK = timedelta(days=62)
+WINDOW_AHEAD = timedelta(days=124)
+LOCAL = datetime.now().astimezone().tzinfo
+
+
+def emit(value):
+    json.dump(value, sys.stdout)
+    sys.stdout.write("\n")
+
+
+def write_private(path, data):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def load_calendars():
+    try:
+        with open(CONFIG) as fh:
+            data = json.load(fh)
+        return [c for c in data if isinstance(c, dict) and c.get("name") and c.get("url")]
+    except (OSError, ValueError):
+        return []
+
+
+# ---- ICS parsing -----------------------------------------------------------
+
+def unfold(text):
+    return re.sub(r"\r?\n[ \t]", "", text).splitlines()
+
+
+def parse_line(line):
+    # NAME;PARAM=a;PARAM="b:c":value
+    head, value, quoted = "", "", False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            quoted = not quoted
+        elif ch == ":" and not quoted:
+            head, value = line[:i], line[i + 1:]
+            break
+    else:
+        return None, {}, ""
+    parts = head.split(";")
+    params = {}
+    for p in parts[1:]:
+        k, _, v = p.partition("=")
+        params[k.upper()] = v.strip('"')
+    return parts[0].upper(), params, value
+
+
+def unescape(value):
+    return re.sub(r"\\([\\,;nN])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), value)
+
+
+def zone(tzid):
+    if not tzid:
+        return LOCAL
+    try:
+        return ZoneInfo(tzid)
+    except (ZoneInfoNotFoundError, ValueError):
+        # Some exporters prefix the Olson name ("/mozilla.org/.../Europe/Paris").
+        match = re.search(r"([A-Za-z]+/[A-Za-z_+-]+(?:/[A-Za-z_+-]+)?)$", tzid)
+        if match:
+            try:
+                return ZoneInfo(match.group(1))
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        return LOCAL
+
+
+def parse_when(value, params):
+    """A DTSTART-like value as (aware datetime, all_day)."""
+    value = value.strip()
+    if params.get("VALUE") == "DATE" or re.fullmatch(r"\d{8}", value):
+        d = datetime.strptime(value[:8], "%Y%m%d")
+        return d.replace(tzinfo=LOCAL), True
+    if value.endswith("Z"):
+        return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc), False
+    return datetime.strptime(value[:15], "%Y%m%dT%H%M%S").replace(tzinfo=zone(params.get("TZID"))), False
+
+
+def parse_duration(value):
+    match = re.fullmatch(r"([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", value.strip())
+    if not match:
+        return None
+    sign, w, d, h, m, s = match.groups()
+    delta = timedelta(weeks=int(w or 0), days=int(d or 0), hours=int(h or 0), minutes=int(m or 0), seconds=int(s or 0))
+    return -delta if sign == "-" else delta
+
+
+def vevents(text):
+    events, current, depth = [], None, 0
+    for line in unfold(text):
+        if line == "BEGIN:VEVENT":
+            current, depth = {"_multi": {}}, 0
+            continue
+        if current is None:
+            continue
+        if line.startswith("BEGIN:"):
+            depth += 1  # VALARM and friends: skip their properties
+            continue
+        if line.startswith("END:") and depth > 0:
+            depth -= 1
+            continue
+        if line == "END:VEVENT":
+            events.append(current)
+            current = None
+            continue
+        if depth > 0:
+            continue
+        name, params, value = parse_line(line)
+        if not name:
+            continue
+        if name in ("EXDATE", "RDATE"):
+            current["_multi"].setdefault(name, []).append((params, value))
+        else:
+            current[name] = (params, value)
+    return events
+
+
+def occurrences(ev, start_window, end_window):
+    if "DTSTART" not in ev:
+        return []
+    start, all_day = parse_when(ev["DTSTART"][1], ev["DTSTART"][0])
+    if "DTEND" in ev:
+        end, _ = parse_when(ev["DTEND"][1], ev["DTEND"][0])
+    elif "DURATION" in ev and parse_duration(ev["DURATION"][1]) is not None:
+        end = start + parse_duration(ev["DURATION"][1])
+    else:
+        end = start + (timedelta(days=1) if all_day else timedelta(0))
+    length = end - start
+
+    if "RRULE" not in ev:
+        return [(start, start + length, all_day)] if start < end_window and start + length >= start_window else []
+
+    # dateutil wants naive local times for floating/all-day rules, and refuses
+    # an aware UNTIL against a naive DTSTART (and the reverse); line them up.
+    rule = ev["RRULE"][1]
+    if all_day:
+        rule = re.sub(r"UNTIL=(\d{8})T\d{6}Z?", r"UNTIL=\1", rule)
+    elif not re.search(r"UNTIL=\d{8}T\d{6}Z", rule):
+        rule = re.sub(r"UNTIL=(\d{8})(?:T(\d{6}))?(?!Z)", lambda m: "UNTIL=%sT%sZ" % (m.group(1), m.group(2) or "235959"), rule)
+    try:
+        dtstart = start.replace(tzinfo=None) if all_day else start
+        rr = rrulestr(rule, dtstart=dtstart, forceset=True)
+    except (ValueError, TypeError):
+        return [(start, start + length, all_day)]
+
+    for kind in ("EXDATE", "RDATE"):
+        for params, value in ev["_multi"].get(kind, []):
+            for one in value.split(","):
+                try:
+                    when, _ = parse_when(one, params)
+                except ValueError:
+                    continue
+                when = when.replace(tzinfo=None) if all_day else when
+                (rr.exdate if kind == "EXDATE" else rr.rdate)(when)
+
+    lo, hi = start_window - length, end_window
+    if all_day:
+        lo, hi = lo.replace(tzinfo=None), hi.replace(tzinfo=None)
+    out = []
+    try:
+        for when in rr.between(lo, hi, inc=True):
+            if all_day:
+                when = when.replace(tzinfo=LOCAL)
+            out.append((when, when + length, all_day))
+            if len(out) > 400:
+                break
+    except (ValueError, TypeError):
+        pass
+    return out
+
+
+def expand(text, cal, color):
+    now = datetime.now(timezone.utc)
+    lo, hi = now - WINDOW_BACK, now + WINDOW_AHEAD
+    raw = vevents(text)
+    # Moved or edited occurrences of a series carry RECURRENCE-ID; they replace
+    # the occurrence the rule would have produced at that time.
+    overrides = {}
+    for ev in raw:
+        if "RECURRENCE-ID" in ev and "UID" in ev:
+            when, _ = parse_when(ev["RECURRENCE-ID"][1], ev["RECURRENCE-ID"][0])
+            overrides.setdefault(ev["UID"][1], set()).add(int(when.timestamp()))
+    out = []
+    for ev in raw:
+        if ev.get("STATUS", ({}, ""))[1].upper() == "CANCELLED":
+            continue
+        uid = ev.get("UID", ({}, ""))[1]
+        is_override = "RECURRENCE-ID" in ev
+        try:
+            occ = occurrences(ev, lo, hi)
+        except ValueError:
+            continue
+        for start, end, all_day in occ:
+            if not is_override and int(start.timestamp()) in overrides.get(uid, ()):
+                continue
+            out.append({
+                "key": "%s|%s|%d" % (cal, uid, start.timestamp()),
+                "calendar": cal,
+                "color": color,
+                "title": unescape(ev.get("SUMMARY", ({}, ""))[1]) or "(busy)",
+                "location": unescape(ev.get("LOCATION", ({}, ""))[1]),
+                "description": unescape(ev.get("DESCRIPTION", ({}, ""))[1])[:500],
+                "start": int(start.timestamp() * 1000),
+                "end": int(end.timestamp() * 1000),
+                "allDay": all_day,
+            })
+    return out
+
+
+# ---- commands --------------------------------------------------------------
+
+def fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "omarchy-proton-calendar", "Accept": "text/calendar"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def sync():
+    cals = load_calendars()
+    events, errors = [], []
+    previous = read_events()
+    for cal in cals:
+        try:
+            text = fetch(cal["url"])
+            if "BEGIN:VCALENDAR" not in text:
+                raise ValueError("the link did not return a calendar")
+            events.extend(expand(text, cal["name"], cal.get("color") or PALETTE[0]))
+        except Exception as exc:  # keep what we had for this calendar
+            errors.append({"calendar": cal["name"], "error": str(exc)[:200]})
+            events.extend(e for e in previous.get("events", []) if e.get("calendar") == cal["name"])
+    events.sort(key=lambda e: (e["start"], not e["allDay"], e["title"]))
+    data = {"syncedAt": int(time.time() * 1000), "errors": errors,
+            "calendars": [{"name": c["name"], "color": c.get("color") or PALETTE[0]} for c in cals],
+            "events": events}
+    write_private(EVENTS, data)
+    emit({"ok": not errors, "errors": errors, "count": len(events), "syncedAt": data["syncedAt"]})
+
+
+def read_events():
+    try:
+        with open(EVENTS) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {"syncedAt": 0, "errors": [], "calendars": [], "events": []}
+
+
+def add(name, url, color=None):
+    if not re.match(r"^https://", url):
+        print("pcal: the link must start with https://", file=sys.stderr)
+        return 1
+    cals = [c for c in load_calendars() if c["name"] != name]
+    color = color or PALETTE[len(cals) % len(PALETTE)]
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        print("pcal: COLOR must look like #3b82f6", file=sys.stderr)
+        return 1
+    cals.append({"name": name, "url": url, "color": color})
+    write_private(CONFIG, cals)
+    print("Added %s. Run `pcal sync` (the panel does it on its own)." % name)
+    return 0
+
+
+def remove(name):
+    cals = load_calendars()
+    kept = [c for c in cals if c["name"] != name]
+    if len(kept) == len(cals):
+        print("pcal: no calendar named %r" % name, file=sys.stderr)
+        return 1
+    write_private(CONFIG, kept)
+    data = read_events()
+    data["events"] = [e for e in data["events"] if e.get("calendar") != name]
+    data["calendars"] = [c for c in data["calendars"] if c.get("name") != name]
+    write_private(EVENTS, data)
+    return 0
+
+
+def agenda(days):
+    now = time.time() * 1000
+    horizon = now + days * 86400000
+    last = ""
+    for e in read_events()["events"]:
+        if e["end"] <= now or e["start"] > horizon:
+            continue
+        start = datetime.fromtimestamp(e["start"] / 1000)
+        day = start.strftime("%a %d %b")
+        if day != last:
+            print(("\n" if last else "") + day)
+            last = day
+        when = "all day" if e["allDay"] else start.strftime("%H:%M")
+        print("  %-8s %s%s" % (when, e["title"], ("  @ " + e["location"]) if e["location"] else ""))
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "events"
+    if cmd == "calendars":
+        emit([{"name": c["name"], "color": c.get("color") or PALETTE[0]} for c in load_calendars()])
+    elif cmd == "add" and len(argv) in (4, 5):
+        return add(argv[2], argv[3], argv[4] if len(argv) == 5 else None)
+    elif cmd == "remove" and len(argv) == 3:
+        return remove(argv[2])
+    elif cmd == "sync":
+        sync()
+    elif cmd == "events":
+        emit(read_events())
+    elif cmd == "agenda":
+        return agenda(int(argv[2]) if len(argv) > 2 else 7)
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
