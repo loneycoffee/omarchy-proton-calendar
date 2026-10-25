@@ -20,6 +20,9 @@ Item {
   property string omarchyPath: ""
 
   readonly property string ctl: Qt.resolvedUrl("bin/pcal").toString().replace(/^file:\/\//, "")
+  // Bundled, as a path: icon-theme names vary between themes, and one the
+  // notification popup cannot find shows up as a checkerboard.
+  readonly property string icon: Qt.resolvedUrl("icons/calendar.svg").toString().replace(/^file:\/\//, "")
 
   property var events: []
   property var calendars: []
@@ -76,7 +79,7 @@ Item {
       var mins = Math.max(0, Math.round((e.start - now) / 60000))
       var when = mins === 0 ? "Now" : "In " + mins + " min"
       var body = when + " · " + Qt.formatTime(new Date(e.start), "HH:mm") + (e.location ? "\n" + e.location : "")
-      Quickshell.execDetached(["notify-send", "-a", "Proton Calendar", "-i", "x-office-calendar", e.title, body])
+      Quickshell.execDetached(["notify-send", "-a", "Proton Calendar", "-i", root.icon, e.title, body])
     }
     root._reminded = seen
   }
